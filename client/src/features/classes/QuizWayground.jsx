@@ -8,7 +8,8 @@ import {
   AlertCircle, Flag, Maximize2, Minimize2
 } from 'lucide-react';
 
-const SOCKET_URL = 'http://localhost:5000';
+const DEFAULT_SOCKET_URL = import.meta.env.DEV ? 'http://localhost:5000' : window.location.origin;
+const SOCKET_URL = (import.meta.env.VITE_SOCKET_URL || import.meta.env.VITE_API_BASE_URL || DEFAULT_SOCKET_URL).replace(/\/$/, '');
 
 export default function QuizWayground({ quiz, onDone }) {
   const { user, profile } = useAuthStore();

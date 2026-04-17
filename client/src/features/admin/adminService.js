@@ -1,6 +1,7 @@
 import { supabase } from '../../config/supabase'
 
-const API_BASE_URL = 'http://localhost:5000'
+const DEFAULT_API_BASE_URL = import.meta.env.DEV ? 'http://localhost:5000' : window.location.origin
+const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || DEFAULT_API_BASE_URL).replace(/\/$/, '')
 
 async function getAuthHeader() {
   const { data, error } = await supabase.auth.getSession()

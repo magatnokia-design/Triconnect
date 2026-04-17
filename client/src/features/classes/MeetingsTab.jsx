@@ -21,8 +21,9 @@ import {
 } from 'lucide-react'
 import { useAuthStore } from '../../store/authStore'
 
-const SOCKET_URL = 'http://localhost:5000'
-const API_BASE_URL = 'http://localhost:5000'
+const DEFAULT_API_BASE_URL = import.meta.env.DEV ? 'http://localhost:5000' : window.location.origin
+const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || DEFAULT_API_BASE_URL).replace(/\/$/, '')
+const SOCKET_URL = (import.meta.env.VITE_SOCKET_URL || API_BASE_URL).replace(/\/$/, '')
 const DEFAULT_ICE_SERVERS = [{ urls: 'stun:stun.l.google.com:19302' }]
 
 function buildDisplayName(profile, user) {
