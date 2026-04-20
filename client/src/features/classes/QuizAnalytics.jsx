@@ -34,6 +34,13 @@ function evaluateSubmission(questions, submission) {
   };
 }
 
+function formatPoints(value) {
+  const numeric = Number(value || 0);
+  if (!Number.isFinite(numeric)) return '0';
+  if (Number.isInteger(numeric)) return `${numeric}`;
+  return numeric.toFixed(2).replace(/\.00$/, '').replace(/(\.\d*[1-9])0+$/, '$1');
+}
+
 export default function QuizAnalytics({ quiz, onBack }) {
   const { profile } = useAuthStore();
   const isTeacher = profile?.role === 'teacher';
@@ -102,9 +109,23 @@ export default function QuizAnalytics({ quiz, onBack }) {
   }
 
   function exportCSV() {
-    const sorted = [...submissions].sort((a, b) =>
-      (a.student_name || a.profiles?.full_name || '').localeCompare(b.student_name || b.profiles?.full_name || '')
-    );
+    const evaluatedForExport = submissions
+      .map((submission) => {
+        const evaluated = evaluateSubmission(questions, submission);
+        const totalPoints = Number(evaluated.total_points || 0);
+        const scorePoints = Number(evaluated.score || 0);
+        const percentage = totalPoints > 0 ? Math.round((scorePoints / totalPoints) * 100) : 0;
+        const studentName = submission.student_name || submission.profiles?.full_name || 'Unknown';
+        const studentCode = submission.profiles?.student_id || '';
+
+        return {
+          studentName,
+          studentCode,
+          scoreDisplay: `${formatPoints(scorePoints)}/${formatPoints(totalPoints)}`,
+          percentage,
+        };
+      })
+      .sort((a, b) => a.studentName.localeCompare(b.studentName));
 
     const escapeCSV = (value) => {
       const stringValue = String(value ?? '');
@@ -115,13 +136,15 @@ export default function QuizAnalytics({ quiz, onBack }) {
     };
 
     const rows = [
-      ['Student Name', 'Score'],
-      ...sorted.map((s) => [
-        escapeCSV(s.student_name || s.profiles?.full_name || 'Unknown'),
-        `${s.score}/${s.total_points}`,
+      ['Student Name', 'Student ID', 'Score', 'Percentage'],
+      ...evaluatedForExport.map((row) => [
+        escapeCSV(row.studentName),
+        escapeCSV(row.studentCode),
+        escapeCSV(row.scoreDisplay),
+        escapeCSV(`${row.percentage}%`),
       ])
     ];
-    const csv = rows.map(r => r.join(',')).join('\n');
+    const csv = `\ufeff${rows.map((r) => r.join(',')).join('\n')}`;
     const blob = new Blob([csv], { type: 'text/csv' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
