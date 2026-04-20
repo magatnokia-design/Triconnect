@@ -12,6 +12,7 @@ import ChatTab from './ChatTab'
 
 
 const TABS = ['Students', 'Modules', 'Assignments', 'Quizzes', 'Meetings', 'Chat']
+const MEETINGS_TEMP_DISABLED = true
 
 const TAB_BY_QUERY = {
   students: 'Students',
@@ -214,18 +215,23 @@ function ClassDetailPage() {
         <div className="bg-white rounded-2xl shadow-md border border-gray-100 overflow-hidden">
           <div className="flex border-b border-gray-100 overflow-x-auto">
             {TABS.map((tab) => (
+              (() => {
+                const isTemporarilyDisabled = MEETINGS_TEMP_DISABLED && tab === 'Meetings'
+                return (
               <button
                 key={tab}
                 onClick={() => handleTabChange(tab)}
                 className={`flex items-center gap-2 px-5 py-4 text-sm font-semibold whitespace-nowrap transition border-b-2 ${
                   activeTab === tab
                     ? 'border-primary text-primary bg-blue-50/50'
-                    : 'border-transparent text-gray-500 hover:text-gray-700 hover:bg-gray-50'
+                    : `border-transparent text-gray-500 ${isTemporarilyDisabled ? 'opacity-75' : 'hover:text-gray-700 hover:bg-gray-50'}`
                 }`}
               >
                 {TAB_ICONS[tab]}
-                {tab}
+                {isTemporarilyDisabled ? 'Meetings (Coming Soon)' : tab}
               </button>
+                )
+              })()
             ))}
           </div>
 
@@ -240,7 +246,9 @@ function ClassDetailPage() {
     <AssignmentsTab classId={id} role={profile?.role} />
   )}
   {activeTab === 'Quizzes' && <QuizzesTab classId={classId} />}
-  {activeTab === 'Meetings' && <MeetingsTab classId={classId} />}
+  {activeTab === 'Meetings' && (
+    MEETINGS_TEMP_DISABLED ? <ComingSoon tab="Meetings" /> : <MeetingsTab classId={classId} />
+  )}
   {activeTab === 'Chat' && (
     <ChatTab
       classId={classId}
@@ -333,7 +341,7 @@ function StudentsTab({ students, role }) {
 }
 
 function ComingSoon({ tab }) {
-  const isTemporarilyDisabled = tab === 'Quizzes' || tab === 'Meetings'
+  const isTemporarilyDisabled = tab === 'Meetings'
 
   return (
     <div className="flex flex-col items-center justify-center py-16 text-center">
