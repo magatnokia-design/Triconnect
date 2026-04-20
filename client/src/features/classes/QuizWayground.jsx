@@ -1,15 +1,12 @@
 import { useState, useEffect, useRef } from 'react';
-import { supabase } from '../../config/supabase';
 import { useAuthStore } from '../../store/authStore';
 import { io } from 'socket.io-client';
+import { SOCKET_OPTIONS, SOCKET_URL, getRealtimeConfigHint, warmupRealtimeEndpoint } from '../../shared/config/realtime';
 import {
   Users, Play, ChevronRight, Trophy,
   Wifi, WifiOff, Clock, Check, Hash,
   AlertCircle, Flag, Maximize2, Minimize2
 } from 'lucide-react';
-
-const DEFAULT_SOCKET_URL = import.meta.env.DEV ? 'http://localhost:5000' : window.location.origin;
-const SOCKET_URL = (import.meta.env.VITE_SOCKET_URL || import.meta.env.VITE_API_BASE_URL || DEFAULT_SOCKET_URL).replace(/\/$/, '');
 
 export default function QuizWayground({ quiz, onDone }) {
   const { user, profile } = useAuthStore();
@@ -26,6 +23,7 @@ export default function QuizWayground({ quiz, onDone }) {
 function TeacherWayground({ quiz, user, onDone }) {
   const socketRef = useRef(null);
   const [code, setCode] = useState(quiz.join_code || '');
+  const [socketError, setSocketError] = useState('');
   const [isFullscreenUI, setIsFullscreenUI] = useState(false);
   const [students, setStudents] = useState([]);
   const [phase, setPhase] = useState('boarding'); // boarding | active | ended
@@ -38,68 +36,126 @@ function TeacherWayground({ quiz, user, onDone }) {
   const [questionEndsAt, setQuestionEndsAt] = useState(null);
   const [timeLeft, setTimeLeft] = useState(null);
   const timerRef = useRef(null);
+  const questionTimeLimitRef = useRef(questionTimeLimitSec);
+  const lateJoinPolicyRef = useRef(lateJoinPolicyCurrentOnly);
 
   useEffect(() => {
-    const socket = io(SOCKET_URL);
-    socketRef.current = socket;
+    questionTimeLimitRef.current = questionTimeLimitSec;
+  }, [questionTimeLimitSec]);
 
-    socket.emit('teacher-init-room', {
-      quizId: quiz.id,
-      teacherId: user.id,
-      questionTimeLimitSec,
-      lateJoinPolicyCurrentOnly,
-    });
+  useEffect(() => {
+    lateJoinPolicyRef.current = lateJoinPolicyCurrentOnly;
+  }, [lateJoinPolicyCurrentOnly]);
 
-    socket.on('room-ready', ({ code: c, students: s, questionTimeLimitSec: t, lateJoinPolicyCurrentOnly: policy }) => {
-      setCode(c);
-      setStudents(s);
-      if (t) setQuestionTimeLimitSec(t);
-      if (typeof policy === 'boolean') setLateJoinPolicyCurrentOnly(policy);
-    });
+  useEffect(() => {
+    let disposed = false;
 
-    socket.on('room-settings-updated', ({ questionTimeLimitSec: t, lateJoinPolicyCurrentOnly: policy }) => {
-      if (t) setQuestionTimeLimitSec(t);
-      if (typeof policy === 'boolean') setLateJoinPolicyCurrentOnly(policy);
-    });
+    const setupSocket = async () => {
+      await warmupRealtimeEndpoint({ attempts: 3 });
 
-    socket.on('question-timer-sync', ({ questionEndsAt: endsAt, questionTimeLimitSec: t }) => {
-      setQuestionEndsAt(endsAt || null);
-      setTimeLeft(endsAt ? Math.max(0, Math.ceil((endsAt - Date.now()) / 1000)) : null);
-      if (t) setQuestionTimeLimitSec(t);
-    });
+      if (disposed) return;
 
-    socket.on('student-list-update', ({ students: s }) => setStudents(s));
+      const socket = io(SOCKET_URL, SOCKET_OPTIONS);
+      socketRef.current = socket;
 
-    socket.on('quiz-started', ({ question, index, total, questionEndsAt: endsAt }) => {
-      setCurrentQ(question);
-      setCurrentIdx(index);
-      setTotalQ(total);
-      setQuestionEndsAt(endsAt || null);
-      setTimeLeft(endsAt ? Math.max(0, Math.ceil((endsAt - Date.now()) / 1000)) : null);
-      setPhase('active');
-    });
+      const emitTeacherInitRoom = () => {
+        socket.emit('teacher-init-room', {
+          quizId: quiz.id,
+          teacherId: user.id,
+          questionTimeLimitSec: questionTimeLimitRef.current,
+          lateJoinPolicyCurrentOnly: lateJoinPolicyRef.current,
+        });
+      };
 
-    socket.on('question-start', ({ question, index, total, questionEndsAt: endsAt }) => {
-      setCurrentQ(question);
-      setCurrentIdx(index);
-      setTotalQ(total);
-      setQuestionEndsAt(endsAt || null);
-      setTimeLeft(endsAt ? Math.max(0, Math.ceil((endsAt - Date.now()) / 1000)) : null);
-    });
+      socket.on('connect', () => {
+        setSocketError('');
+        emitTeacherInitRoom();
+      });
 
-    socket.on('quiz-ended', () => {
-      setPhase('ended');
-      setQuestionEndsAt(null);
-      setTimeLeft(null);
-    });
+      socket.on('disconnect', (reason) => {
+        if (reason === 'io client disconnect') return;
+        setSocketError('Quiz room connection lost. Reconnecting...');
+      });
 
-    socket.on('results-revealed', ({ results: r }) => setResults(r));
+      socket.on('connect_error', () => {
+        setSocketError('Connecting to quiz room...');
+      });
+
+      socket.io.on('reconnect_attempt', () => {
+        setSocketError('Reconnecting to quiz room...');
+      });
+
+      socket.io.on('reconnect', () => {
+        setSocketError('');
+        emitTeacherInitRoom();
+      });
+
+      socket.io.on('reconnect_failed', () => {
+        setSocketError(getRealtimeConfigHint('Quiz room connection'));
+      });
+
+      socket.on('quiz-error', ({ message }) => {
+        setSocketError(message || getRealtimeConfigHint('Quiz room connection'));
+      });
+
+      emitTeacherInitRoom();
+
+      socket.on('room-ready', ({ code: c, students: s, questionTimeLimitSec: t, lateJoinPolicyCurrentOnly: policy }) => {
+        setSocketError('');
+        setCode(c);
+        setStudents(s);
+        if (t) setQuestionTimeLimitSec(t);
+        if (typeof policy === 'boolean') setLateJoinPolicyCurrentOnly(policy);
+      });
+
+      socket.on('room-settings-updated', ({ questionTimeLimitSec: t, lateJoinPolicyCurrentOnly: policy }) => {
+        if (t) setQuestionTimeLimitSec(t);
+        if (typeof policy === 'boolean') setLateJoinPolicyCurrentOnly(policy);
+      });
+
+      socket.on('question-timer-sync', ({ questionEndsAt: endsAt, questionTimeLimitSec: t }) => {
+        setQuestionEndsAt(endsAt || null);
+        setTimeLeft(endsAt ? Math.max(0, Math.ceil((endsAt - Date.now()) / 1000)) : null);
+        if (t) setQuestionTimeLimitSec(t);
+      });
+
+      socket.on('student-list-update', ({ students: s }) => setStudents(s));
+
+      socket.on('quiz-started', ({ question, index, total, questionEndsAt: endsAt }) => {
+        setCurrentQ(question);
+        setCurrentIdx(index);
+        setTotalQ(total);
+        setQuestionEndsAt(endsAt || null);
+        setTimeLeft(endsAt ? Math.max(0, Math.ceil((endsAt - Date.now()) / 1000)) : null);
+        setPhase('active');
+      });
+
+      socket.on('question-start', ({ question, index, total, questionEndsAt: endsAt }) => {
+        setCurrentQ(question);
+        setCurrentIdx(index);
+        setTotalQ(total);
+        setQuestionEndsAt(endsAt || null);
+        setTimeLeft(endsAt ? Math.max(0, Math.ceil((endsAt - Date.now()) / 1000)) : null);
+      });
+
+      socket.on('quiz-ended', () => {
+        setPhase('ended');
+        setQuestionEndsAt(null);
+        setTimeLeft(null);
+      });
+
+      socket.on('results-revealed', ({ results: r }) => setResults(r));
+    };
+
+    setupSocket();
 
     return () => {
+      disposed = true;
       clearInterval(timerRef.current);
-      socket.disconnect();
+      socketRef.current?.disconnect();
+      socketRef.current = null;
     };
-  }, [quiz.id]);
+  }, [quiz.id, user.id]);
 
   useEffect(() => {
     clearInterval(timerRef.current);
@@ -191,9 +247,15 @@ function TeacherWayground({ quiz, user, onDone }) {
         {/* Join Code */}
         <div className="bg-gradient-to-br from-primary to-primary-dark rounded-2xl p-8 text-center text-white shadow-xl">
           <p className="text-sm font-medium opacity-80 mb-2">Quiz Join Code</p>
+          {socketError && (
+            <div className="mb-4 rounded-xl border border-red-300 bg-red-50/95 px-3 py-2 text-xs text-red-700 inline-flex items-center gap-2">
+              <AlertCircle size={13} />
+              {socketError}
+            </div>
+          )}
           <div className="flex items-center justify-center gap-3 mb-2">
             <Hash size={28} className="opacity-70" />
-            <span className="text-6xl font-black tracking-widest font-mono">{code}</span>
+            <span className="text-6xl font-black tracking-widest font-mono">{code || '------'}</span>
           </div>
           <p className="text-sm opacity-70">Students enter this code to join</p>
         </div>
@@ -443,64 +505,117 @@ function StudentWayground({ quiz, user, profile, onDone }) {
   const timerRef = useRef(null);
 
   useEffect(() => {
-    const socket = io(SOCKET_URL);
-    socketRef.current = socket;
+    let disposed = false;
 
-    socket.on('joined-waiting', () => setPhase('waiting'));
-    socket.on('join-error', ({ message }) => { setError(message); setPhase('joining'); });
+    const setupSocket = async () => {
+      await warmupRealtimeEndpoint({ attempts: 3 });
 
-    socket.on('quiz-started', ({ question, index, total, questionEndsAt: endsAt }) => {
-      setCurrentQ(question);
-      setCurrentIdx(index);
-      setTotalQ(total);
-      setSubmitted(false);
-      setDraftAnswer('');
-      setQuestionEndsAt(endsAt || null);
-      setTimeLeft(endsAt ? Math.max(0, Math.ceil((endsAt - Date.now()) / 1000)) : null);
-      setPhase('active');
-    });
+      if (disposed) return;
 
-    socket.on('question-start', ({ question, index, total, questionEndsAt: endsAt }) => {
-      setCurrentQ(question);
-      setCurrentIdx(index);
-      setTotalQ(total);
-      setSubmitted(false);
-      setDraftAnswer('');
-      setQuestionEndsAt(endsAt || null);
-      setTimeLeft(endsAt ? Math.max(0, Math.ceil((endsAt - Date.now()) / 1000)) : null);
-    });
+      const socket = io(SOCKET_URL, SOCKET_OPTIONS);
+      socketRef.current = socket;
 
-    socket.on('question-timer-sync', ({ questionEndsAt: endsAt }) => {
-      setQuestionEndsAt(endsAt || null);
-      setTimeLeft(endsAt ? Math.max(0, Math.ceil((endsAt - Date.now()) / 1000)) : null);
-    });
+      const emitStudentJoin = () => {
+        if (quiz.status !== 'waiting' && quiz.status !== 'active') return;
+        socket.emit('student-join', {
+          code: quiz.join_code,
+          studentId: user.id,
+          studentName: profile?.full_name || 'Student',
+        });
+      };
 
-    socket.on('submit-rejected', ({ message }) => {
-      setSubmitted(false);
-      setError(message || 'Answer not accepted.');
-    });
-
-    socket.on('quiz-ended', () => {
-      setPhase('ended');
-      setQuestionEndsAt(null);
-      setTimeLeft(null);
-    });
-    socket.on('results-revealed', ({ results: r }) => { setResults(r); setPhase('results'); });
-
-    // Auto-join if quiz is in waiting/active state
-    if (quiz.status === 'waiting' || quiz.status === 'active') {
-      socket.emit('student-join', {
-        code: quiz.join_code,
-        studentId: user.id,
-        studentName: profile?.full_name || 'Student',
+      socket.on('connect', () => {
+        setError('');
+        emitStudentJoin();
       });
-    }
+
+      socket.on('disconnect', (reason) => {
+        if (reason === 'io client disconnect') return;
+        setError('Connection lost. Reconnecting to quiz room...');
+        setPhase('joining');
+      });
+
+      socket.on('connect_error', () => {
+        setError('Connecting to quiz room...');
+        setPhase('joining');
+      });
+
+      socket.io.on('reconnect_attempt', () => {
+        setError('Reconnecting to quiz room...');
+        setPhase('joining');
+      });
+
+      socket.io.on('reconnect', () => {
+        setError('');
+        emitStudentJoin();
+      });
+
+      socket.io.on('reconnect_failed', () => {
+        setError(getRealtimeConfigHint('Quiz room connection'));
+        setPhase('joining');
+      });
+
+      socket.on('quiz-error', ({ message }) => {
+        setError(message || getRealtimeConfigHint('Quiz room connection'));
+      });
+
+      socket.on('joined-waiting', () => {
+        setError('');
+        setPhase('waiting');
+      });
+      socket.on('join-error', ({ message }) => { setError(message); setPhase('joining'); });
+
+      socket.on('quiz-started', ({ question, index, total, questionEndsAt: endsAt }) => {
+        setError('');
+        setCurrentQ(question);
+        setCurrentIdx(index);
+        setTotalQ(total);
+        setSubmitted(false);
+        setDraftAnswer('');
+        setQuestionEndsAt(endsAt || null);
+        setTimeLeft(endsAt ? Math.max(0, Math.ceil((endsAt - Date.now()) / 1000)) : null);
+        setPhase('active');
+      });
+
+      socket.on('question-start', ({ question, index, total, questionEndsAt: endsAt }) => {
+        setCurrentQ(question);
+        setCurrentIdx(index);
+        setTotalQ(total);
+        setSubmitted(false);
+        setDraftAnswer('');
+        setQuestionEndsAt(endsAt || null);
+        setTimeLeft(endsAt ? Math.max(0, Math.ceil((endsAt - Date.now()) / 1000)) : null);
+      });
+
+      socket.on('question-timer-sync', ({ questionEndsAt: endsAt }) => {
+        setQuestionEndsAt(endsAt || null);
+        setTimeLeft(endsAt ? Math.max(0, Math.ceil((endsAt - Date.now()) / 1000)) : null);
+      });
+
+      socket.on('submit-rejected', ({ message }) => {
+        setSubmitted(false);
+        setError(message || 'Answer not accepted.');
+      });
+
+      socket.on('quiz-ended', () => {
+        setPhase('ended');
+        setQuestionEndsAt(null);
+        setTimeLeft(null);
+      });
+      socket.on('results-revealed', ({ results: r }) => { setResults(r); setPhase('results'); });
+
+      emitStudentJoin();
+    };
+
+    setupSocket();
 
     return () => {
+      disposed = true;
       clearInterval(timerRef.current);
-      socket.disconnect();
+      socketRef.current?.disconnect();
+      socketRef.current = null;
     };
-  }, []);
+  }, [quiz.id, quiz.join_code, quiz.status, user.id, profile?.full_name]);
 
   useEffect(() => {
     clearInterval(timerRef.current);

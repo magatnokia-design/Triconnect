@@ -20,10 +20,8 @@ import {
   Download,
 } from 'lucide-react'
 import { useAuthStore } from '../../store/authStore'
+import { API_BASE_URL, SOCKET_OPTIONS, SOCKET_RECONNECTION_ENABLED, SOCKET_URL, warmupRealtimeEndpoint } from '../../shared/config/realtime'
 
-const DEFAULT_API_BASE_URL = import.meta.env.DEV ? 'http://localhost:5000' : window.location.origin
-const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || DEFAULT_API_BASE_URL).replace(/\/$/, '')
-const SOCKET_URL = (import.meta.env.VITE_SOCKET_URL || API_BASE_URL).replace(/\/$/, '')
 const DEFAULT_ICE_SERVERS = [{ urls: 'stun:stun.l.google.com:19302' }]
 
 function buildDisplayName(profile, user) {
@@ -55,7 +53,7 @@ export default function MeetingsTab({ classId }) {
   const [micOn, setMicOn] = useState(true)
   const [camOn, setCamOn] = useState(true)
   const [screenOn, setScreenOn] = useState(false)
-  const [iceServers, setIceServers] = useState(DEFAULT_ICE_SERVERS)
+  const [, setIceServers] = useState(DEFAULT_ICE_SERVERS)
   const [isFullscreenUI, setIsFullscreenUI] = useState(false)
   const [focusTile, setFocusTile] = useState('local')
   const [attendanceSessions, setAttendanceSessions] = useState([])
@@ -73,6 +71,8 @@ export default function MeetingsTab({ classId }) {
   const [connectionDetail, setConnectionDetail] = useState('')
 
   const socketRef = useRef(null)
+  const endingMeetingRef = useRef(false)
+  const endMeetingFallbackTimerRef = useRef(null)
   const localVideoRef = useRef(null)
   const localStreamRef = useRef(null)
   const cameraTrackRef = useRef(null)
@@ -255,8 +255,23 @@ export default function MeetingsTab({ classId }) {
     }
   }
 
-  const leaveMeeting = () => {
-    socketRef.current?.emit('meeting:leave', { meetingId })
+  const clearEndMeetingFallbackTimer = () => {
+    if (!endMeetingFallbackTimerRef.current) return
+    window.clearTimeout(endMeetingFallbackTimerRef.current)
+    endMeetingFallbackTimerRef.current = null
+  }
+
+  const leaveMeeting = ({ skipServerLeave = false, preserveError = false } = {}) => {
+    clearEndMeetingFallbackTimer()
+
+    if (socketRef.current?.io?.opts) {
+      socketRef.current.io.opts.reconnection = false
+    }
+
+    if (!skipServerLeave) {
+      socketRef.current?.emit('meeting:leave', { meetingId })
+    }
+
     socketRef.current?.disconnect()
     socketRef.current = null
     closeAllPeers()
@@ -277,6 +292,10 @@ export default function MeetingsTab({ classId }) {
     setAttendanceGraceUntil(null)
     setConnectionStatus('idle')
     setConnectionDetail('')
+    if (!preserveError) {
+      setError('')
+    }
+    endingMeetingRef.current = false
   }
 
   const emitMediaState = (next = {}) => {
@@ -329,9 +348,16 @@ export default function MeetingsTab({ classId }) {
   }
 
   const joinMeeting = async () => {
+    if (connectionStatus === 'connecting') return
+
+    if (socketRef.current) {
+      socketRef.current.disconnect()
+      socketRef.current = null
+    }
+
     setError('')
     setConnectionStatus('connecting')
-    setConnectionDetail('Connecting to meeting server...')
+    setConnectionDetail('Preparing meeting connection...')
 
     try {
       let stream = null
@@ -358,38 +384,69 @@ export default function MeetingsTab({ classId }) {
 
       syncLocalPreview()
 
-      const socket = io(SOCKET_URL)
+      await warmupRealtimeEndpoint({ attempts: 3 })
+      setConnectionDetail('Connecting to meeting server...')
+
+      const socket = io(SOCKET_URL, SOCKET_OPTIONS)
       socketRef.current = socket
 
+      const emitJoinRequest = () => {
+        socket.emit('meeting:join', {
+          meetingId,
+          classId,
+          userId: user?.id,
+          name: myName,
+          role: profile?.role,
+          micOn: true,
+          camOn: Boolean(cameraTrackRef.current),
+          screenOn: false,
+        })
+      }
+
       socket.on('connect', () => {
+        if (endingMeetingRef.current) return
         setConnectionStatus('connected')
         setConnectionDetail('Connected. Meeting is live.')
       })
 
       socket.on('connect_error', () => {
+        if (endingMeetingRef.current) return
         setConnectionStatus('reconnecting')
         setConnectionDetail('Network issue detected. Retrying connection...')
       })
 
       socket.on('disconnect', (reason) => {
         if (reason === 'io client disconnect') return
-        setConnectionStatus('reconnecting')
-        setConnectionDetail('Disconnected from server. Trying to reconnect...')
+        if (endingMeetingRef.current) return
+        if (SOCKET_RECONNECTION_ENABLED) {
+          setConnectionStatus('reconnecting')
+          setConnectionDetail('Disconnected from server. Trying to reconnect...')
+          return
+        }
+
+        setConnectionStatus('disconnected')
+        setConnectionDetail('Connection dropped. Please leave and join the meeting again.')
+        setError('Meeting connection dropped. Please leave and join again.')
       })
 
       socket.io.on('reconnect_attempt', () => {
+        if (endingMeetingRef.current) return
         setConnectionStatus('reconnecting')
         setConnectionDetail('Reconnecting to meeting...')
       })
 
       socket.io.on('reconnect', () => {
+        if (endingMeetingRef.current) return
         setConnectionStatus('connected')
-        setConnectionDetail('Reconnected successfully.')
+        setConnectionDetail('Reconnected successfully. Syncing meeting...')
+        emitJoinRequest()
       })
 
       socket.io.on('reconnect_failed', () => {
+        if (endingMeetingRef.current) return
         setConnectionStatus('disconnected')
         setConnectionDetail('Unable to reconnect. Leave and rejoin the meeting.')
+        setError('Meeting connection is unstable. Please leave and join again.')
       })
 
       socket.on('meeting:error', ({ message }) => {
@@ -397,6 +454,7 @@ export default function MeetingsTab({ classId }) {
       })
 
       socket.on('meeting:joined', async ({ participants: existing, isHost: host, hostSocketId: hostSid, hostReconnectUntil: reconnectUntil, iceServers: nextIceServers, attendanceGraceUntil: nextAttendanceGraceUntil }) => {
+        setError('')
         setJoined(true)
         setConnectionStatus('connected')
         setConnectionDetail('Connected. Meeting is live.')
@@ -448,13 +506,15 @@ export default function MeetingsTab({ classId }) {
       })
 
       socket.on('meeting:ended', () => {
+        clearEndMeetingFallbackTimer()
         setError('Meeting has ended.')
-        leaveMeeting()
+        leaveMeeting({ skipServerLeave: true, preserveError: true })
       })
 
       socket.on('meeting:removed', (payload = {}) => {
+        clearEndMeetingFallbackTimer()
         setError(payload?.message || 'You were removed by the host.')
-        leaveMeeting()
+        leaveMeeting({ skipServerLeave: true, preserveError: true })
       })
 
       socket.on('media:state-changed', ({ socketId, micOn: nextMic, camOn: nextCam, screenOn: nextScreen }) => {
@@ -481,16 +541,7 @@ export default function MeetingsTab({ classId }) {
         await handleIncomingCandidate(payload)
       })
 
-      socket.emit('meeting:join', {
-        meetingId,
-        classId,
-        userId: user?.id,
-        name: myName,
-        role: profile?.role,
-        micOn: true,
-        camOn: Boolean(cameraTrackRef.current),
-        screenOn: false,
-      })
+      emitJoinRequest()
     } catch {
       setError('Camera/microphone access is required to join.')
       stopLocalMedia()
@@ -607,7 +658,27 @@ export default function MeetingsTab({ classId }) {
 
   const endMeeting = () => {
     if (!isHost) return
-    socketRef.current?.emit('meeting:end', { meetingId })
+    if (endingMeetingRef.current) return
+
+    endingMeetingRef.current = true
+    setError('')
+    setConnectionStatus('disconnected')
+    setConnectionDetail('Ending meeting...')
+
+    const socket = socketRef.current
+
+    if (socket?.io?.opts) {
+      socket.io.opts.reconnection = false
+    }
+
+    socket?.emit('meeting:end', { meetingId })
+    window.setTimeout(() => socket?.emit('meeting:end', { meetingId }), 250)
+    window.setTimeout(() => socket?.emit('meeting:end', { meetingId }), 650)
+
+    clearEndMeetingFallbackTimer()
+    endMeetingFallbackTimerRef.current = window.setTimeout(() => {
+      leaveMeeting({ skipServerLeave: true, preserveError: true })
+    }, 1200)
   }
 
   const setAttendanceGrace = () => {
@@ -806,9 +877,10 @@ export default function MeetingsTab({ classId }) {
             </div>
             <button
               onClick={joinMeeting}
+              disabled={connectionStatus === 'connecting' || connectionStatus === 'reconnecting'}
               className="px-5 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold transition"
             >
-              Join Meeting
+              {connectionStatus === 'connecting' || connectionStatus === 'reconnecting' ? 'Connecting...' : 'Join Meeting'}
             </button>
           </div>
 

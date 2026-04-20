@@ -1,0 +1,32 @@
+services:
+  - type: web
+    name: triconnect-realtime
+    runtime: node
+    rootDir: server
+    buildCommand: npm install
+    startCommand: npm run start
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      - key: NODE_VERSION
+        value: "20"
+      - key: SOCKET_IO_PATH
+        value: /socket.io
+      - key: SOCKET_CORS_ORIGIN
+        value: https://www.triconnect.online,https://triconnect.online,https://*.vercel.app
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_KEY
+        sync: false
+      - key: MEETING_HOST_RECONNECT_GRACE_MS
+        value: "30000"
+      - key: QUIZ_TEACHER_RECONNECT_GRACE_MS
+        value: "45000"
+      - key: MEETING_STUN_URLS
+        value: stun:stun.relay.metered.ca:80
+      - key: MEETING_TURN_URLS
+        value: turn:global.relay.metered.ca:80,turn:global.relay.metered.ca:80?transport=tcp,turn:global.relay.metered.ca:443,turns:global.relay.metered.ca:443?transport=tcp
+      - key: MEETING_TURN_USERNAME
+        sync: false
+      - key: MEETING_TURN_CREDENTIAL
+        sync: false

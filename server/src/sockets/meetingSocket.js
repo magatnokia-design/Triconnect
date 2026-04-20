@@ -2,6 +2,14 @@ const { supabase } = require('../shared/config/supabase')
 
 const HOST_RECONNECT_GRACE_MS = Number(process.env.MEETING_HOST_RECONNECT_GRACE_MS || 30000)
 
+const DEFAULT_METERED_STUN_URLS = ['stun:stun.relay.metered.ca:80']
+const DEFAULT_METERED_TURN_URLS = [
+  'turn:global.relay.metered.ca:80',
+  'turn:global.relay.metered.ca:80?transport=tcp',
+  'turn:global.relay.metered.ca:443',
+  'turns:global.relay.metered.ca:443?transport=tcp',
+]
+
 // meetingId => room state
 const rooms = new Map()
 
@@ -20,10 +28,20 @@ function parseList(value, fallback = []) {
 }
 
 function buildIceServers() {
-  const stunUrls = parseList(process.env.MEETING_STUN_URLS, ['stun:stun.l.google.com:19302'])
-  const turnUrls = parseList(process.env.MEETING_TURN_URLS, [])
-  const turnUsername = process.env.MEETING_TURN_USERNAME
-  const turnCredential = process.env.MEETING_TURN_CREDENTIAL
+  const turnUsername = process.env.MEETING_TURN_USERNAME || process.env.METERED_TURN_USERNAME || process.env.METERED_USERNAME
+  const turnCredential = process.env.MEETING_TURN_CREDENTIAL || process.env.METERED_TURN_CREDENTIAL || process.env.METERED_CREDENTIAL
+
+  let stunUrls = parseList(process.env.MEETING_STUN_URLS, [])
+  let turnUrls = parseList(process.env.MEETING_TURN_URLS, [])
+
+  if (turnUsername && turnCredential) {
+    if (!stunUrls.length) stunUrls = DEFAULT_METERED_STUN_URLS
+    if (!turnUrls.length) turnUrls = DEFAULT_METERED_TURN_URLS
+  }
+
+  if (!stunUrls.length) {
+    stunUrls = ['stun:stun.l.google.com:19302']
+  }
 
   const iceServers = []
   if (stunUrls.length) {
