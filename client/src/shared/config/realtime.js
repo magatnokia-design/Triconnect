@@ -59,6 +59,24 @@ function parseTransports(value) {
     .filter(Boolean)
 }
 
+function normalizeTransports(transports = [], { preferPollingFirst = false } = {}) {
+  const allowed = new Set(['polling', 'websocket'])
+  const normalized = []
+
+  for (const transport of transports) {
+    if (!allowed.has(transport)) continue
+    if (!normalized.includes(transport)) {
+      normalized.push(transport)
+    }
+  }
+
+  if (preferPollingFirst && normalized.includes('polling') && normalized.includes('websocket')) {
+    return ['polling', 'websocket']
+  }
+
+  return normalized
+}
+
 function parseBoolean(value, fallback) {
   if (value === undefined || value === null || value === '') return fallback
   return ['1', 'true', 'yes', 'on'].includes(`${value}`.toLowerCase())
@@ -69,16 +87,16 @@ function parseNumber(value, fallback) {
   return Number.isFinite(parsed) ? parsed : fallback
 }
 
-const configuredTransports = parseTransports(import.meta.env.VITE_SOCKET_TRANSPORTS)
+const isServerlessSameOriginMode = !import.meta.env.DEV && !configuredSocketUrl && !isExternalSocketHost
+const isExternalSocketHostMode = !import.meta.env.DEV && isExternalSocketHost
+
+const configuredTransports = normalizeTransports(parseTransports(import.meta.env.VITE_SOCKET_TRANSPORTS), {
+  preferPollingFirst: isExternalSocketHostMode,
+})
 
 const defaultTransports = configuredTransports.length > 0
   ? configuredTransports
-  : ((!import.meta.env.DEV && !configuredSocketUrl && !isExternalSocketHost)
-      ? ['polling']
-      : ['websocket', 'polling'])
-
-const isServerlessSameOriginMode = !import.meta.env.DEV && !configuredSocketUrl && !isExternalSocketHost
-const isExternalSocketHostMode = !import.meta.env.DEV && isExternalSocketHost
+  : (isServerlessSameOriginMode ? ['polling'] : ['polling', 'websocket'])
 
 const defaultReconnectionEnabled = true
 const reconnectionEnabled = parseBoolean(import.meta.env.VITE_SOCKET_RECONNECTION, defaultReconnectionEnabled)
@@ -105,6 +123,7 @@ export const SOCKET_OPTIONS = {
   path: SOCKET_PATH,
   transports: defaultTransports,
   upgrade: defaultTransports.includes('websocket'),
+  tryAllTransports: true,
   timeout: socketTimeoutMs,
   reconnection: reconnectionEnabled,
   reconnectionAttempts,

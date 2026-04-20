@@ -98,8 +98,6 @@ function TeacherWayground({ quiz, user, onDone }) {
         setSocketError(message || getRealtimeConfigHint('Quiz room connection'));
       });
 
-      emitTeacherInitRoom();
-
       socket.on('room-ready', ({ code: c, students: s, questionTimeLimitSec: t, lateJoinPolicyCurrentOnly: policy }) => {
         setSocketError('');
         setCode(c);
@@ -516,7 +514,6 @@ function StudentWayground({ quiz, user, profile, onDone }) {
       socketRef.current = socket;
 
       const emitStudentJoin = () => {
-        if (quiz.status !== 'waiting' && quiz.status !== 'active') return;
         socket.emit('student-join', {
           code: quiz.join_code,
           studentId: user.id,
@@ -604,7 +601,6 @@ function StudentWayground({ quiz, user, profile, onDone }) {
       });
       socket.on('results-revealed', ({ results: r }) => { setResults(r); setPhase('results'); });
 
-      emitStudentJoin();
     };
 
     setupSocket();
