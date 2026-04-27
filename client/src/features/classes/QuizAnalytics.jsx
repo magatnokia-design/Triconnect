@@ -112,20 +112,21 @@ export default function QuizAnalytics({ quiz, onBack }) {
     const evaluatedForExport = submissions
       .map((submission) => {
         const evaluated = evaluateSubmission(questions, submission);
-        const totalPoints = Number(evaluated.total_points || 0);
         const scorePoints = Number(evaluated.score || 0);
-        const percentage = totalPoints > 0 ? Math.round((scorePoints / totalPoints) * 100) : 0;
         const studentName = submission.student_name || submission.profiles?.full_name || 'Unknown';
         const studentCode = submission.profiles?.student_id || '';
 
         return {
           studentName,
           studentCode,
-          scoreDisplay: `${formatPoints(scorePoints)}/${formatPoints(totalPoints)}`,
-          percentage,
+          score: formatPoints(scorePoints),
         };
       })
-      .sort((a, b) => a.studentName.localeCompare(b.studentName));
+      .sort((a, b) => {
+        const byName = a.studentName.localeCompare(b.studentName);
+        if (byName !== 0) return byName;
+        return a.studentCode.localeCompare(b.studentCode);
+      });
 
     const escapeCSV = (value) => {
       const stringValue = String(value ?? '');
@@ -136,12 +137,11 @@ export default function QuizAnalytics({ quiz, onBack }) {
     };
 
     const rows = [
-      ['Student Name', 'Student ID', 'Score', 'Percentage'],
+      ['Student Name', 'Student ID', 'Score'],
       ...evaluatedForExport.map((row) => [
         escapeCSV(row.studentName),
         escapeCSV(row.studentCode),
-        escapeCSV(row.scoreDisplay),
-        escapeCSV(`${row.percentage}%`),
+        escapeCSV(row.score),
       ])
     ];
     const csv = `\ufeff${rows.map((r) => r.join(',')).join('\n')}`;
