@@ -27,6 +27,10 @@ function parseList(value, fallback = []) {
     .filter(Boolean)
 }
 
+function generateMeetingCode() {
+  return String(Math.floor(100000 + Math.random() * 900000))
+}
+
 function buildIceServers() {
   const turnUsername = process.env.MEETING_TURN_USERNAME || process.env.METERED_TURN_USERNAME || process.env.METERED_USERNAME
   const turnCredential = process.env.MEETING_TURN_CREDENTIAL || process.env.METERED_TURN_CREDENTIAL || process.env.METERED_CREDENTIAL
@@ -195,7 +199,7 @@ function toIso(value) {
 }
 
 async function canJoinMeeting(classId, userId) {
-  if (!classId || !userId) return { allowed: false, role: null }
+  if (!classId || !userId) return { allowed: false, role: null, teacherId: null }
 
   const { data: classData } = await supabase
     .from('classes')
@@ -203,10 +207,12 @@ async function canJoinMeeting(classId, userId) {
     .eq('id', classId)
     .single()
 
-  if (!classData) return { allowed: false, role: null }
+  if (!classData) return { allowed: false, role: null, teacherId: null }
 
-  if (classData.teacher_id === userId) {
-    return { allowed: true, role: 'teacher' }
+  const teacherId = classData.teacher_id || null
+
+  if (teacherId && teacherId === userId) {
+    return { allowed: true, role: 'teacher', teacherId }
   }
 
   const { data: enrollment } = await supabase
@@ -217,10 +223,10 @@ async function canJoinMeeting(classId, userId) {
     .maybeSingle()
 
   if (enrollment) {
-    return { allowed: true, role: 'student' }
+    return { allowed: true, role: 'student', teacherId }
   }
 
-  return { allowed: false, role: null }
+  return { allowed: false, role: null, teacherId }
 }
 
 async function notifyMeetingStarted(classId, teacherId) {
@@ -258,6 +264,13 @@ module.exports = function setupMeetingSocket(io) {
     })
   }
 
+  const isTeacherHost = (room, socket) => {
+    if (!room || !socket) return false
+    if (room.hostSocketId !== socket.id) return false
+    const participant = room.participants.get(socket.id)
+    return participant?.role === 'teacher'
+  }
+
   const clearHostReconnectTimer = (room) => {
     if (!room?.hostReconnectTimer) return
     clearTimeout(room.hostReconnectTimer)
@@ -267,28 +280,38 @@ module.exports = function setupMeetingSocket(io) {
 
   const tryAutoAssignHost = async (meetingId, room) => {
     const nextTeacher = Array.from(room.participants.values()).find((p) => p.role === 'teacher')
-    const fallback = Array.from(room.participants.values())[0]
-    const nextHost = nextTeacher || fallback
 
-    if (!nextHost) {
-      await closeMeetingSession(room, 'ended')
-      rooms.delete(meetingId)
+    if (!nextTeacher) {
+      room.hostSocketId = null
+      clearHostReconnectTimer(room)
+
+      io.to(meetingId).emit('meeting:host-changed', {
+        hostSocketId: null,
+        hostUserId: room.hostUserId,
+      })
+
+      emitMeetingState(meetingId, room)
+
+      await persistEvent(room, 'host_changed', null, {
+        hostSocketId: null,
+        reason: 'no_teacher_available',
+      })
       return
     }
 
-    room.hostSocketId = nextHost.socketId
-    room.hostUserId = nextHost.userId
+    room.hostSocketId = nextTeacher.socketId
+    room.hostUserId = nextTeacher.userId
     clearHostReconnectTimer(room)
 
     io.to(meetingId).emit('meeting:host-changed', {
-      hostSocketId: nextHost.socketId,
-      hostUserId: nextHost.userId,
+      hostSocketId: nextTeacher.socketId,
+      hostUserId: nextTeacher.userId,
     })
 
     emitMeetingState(meetingId, room)
 
-    await persistEvent(room, 'host_changed', nextHost.userId, {
-      hostSocketId: nextHost.socketId,
+    await persistEvent(room, 'host_changed', nextTeacher.userId, {
+      hostSocketId: nextTeacher.socketId,
     })
   }
 
@@ -383,11 +406,17 @@ module.exports = function setupMeetingSocket(io) {
       }
 
       let room = rooms.get(normalizedMeetingId)
+      if (!room && access.role !== 'teacher') {
+        socket.emit('meeting:error', { message: 'Teacher has not started the meeting yet.' })
+        return
+      }
+
       const isNewRoom = !room
       if (!room) {
         room = {
           classId,
-          hostUserId: null,
+          teacherId: access.teacherId || null,
+          hostUserId: access.teacherId || null,
           hostSocketId: null,
           participants: new Map(),
           createdAt: Date.now(),
@@ -396,11 +425,38 @@ module.exports = function setupMeetingSocket(io) {
           hostReconnectUntil: null,
           attendanceGraceUntil: null,
           attendanceJoinClosed: false,
+          notifiedStarted: false,
+          meetingCode: null,
         }
         rooms.set(normalizedMeetingId, room)
+      }
 
-        if (access.role === 'teacher') {
-          await notifyMeetingStarted(classId, userId)
+      if (!room.teacherId && access.teacherId) {
+        room.teacherId = access.teacherId
+      }
+
+      if (!room.hostUserId && room.teacherId) {
+        room.hostUserId = room.teacherId
+      }
+
+      if (access.role === 'teacher' && !room.notifiedStarted) {
+        await notifyMeetingStarted(classId, userId)
+        room.notifiedStarted = true
+      }
+
+      if (access.role === 'teacher' && !room.meetingCode) {
+        room.meetingCode = generateMeetingCode()
+      }
+
+      const providedMeetingCode = String(payload.meetingCode || '').trim()
+      if (access.role === 'student') {
+        if (!room.meetingCode) {
+          socket.emit('meeting:error', { message: 'Meeting code is not set yet.' })
+          return
+        }
+        if (providedMeetingCode !== room.meetingCode) {
+          socket.emit('meeting:error', { message: 'Invalid meeting code.' })
+          return
         }
       }
 
@@ -462,20 +518,17 @@ module.exports = function setupMeetingSocket(io) {
 
       room.participants.set(socket.id, participant)
 
-      if (!room.sessionId) {
-        room.sessionId = await createMeetingSession(room, normalizedMeetingId, classId, userId)
-      }
+      const previousHostSocketId = room.hostSocketId
 
-      if (!room.hostSocketId && (!room.hostUserId || room.hostUserId === userId || access.role === 'teacher')) {
+      if (access.role === 'teacher') {
         room.hostSocketId = socket.id
         room.hostUserId = userId
         clearHostReconnectTimer(room)
       }
 
-      // If host reconnects within grace window, reclaim host immediately.
-      if (!room.hostSocketId && room.hostUserId === userId) {
-        room.hostSocketId = socket.id
-        clearHostReconnectTimer(room)
+      if (!room.sessionId) {
+        const sessionHostId = room.hostUserId || (access.role === 'teacher' ? userId : null)
+        room.sessionId = await createMeetingSession(room, normalizedMeetingId, classId, sessionHostId)
       }
 
       participant.presenceId = await trackParticipantJoin(room, participant)
@@ -496,7 +549,15 @@ module.exports = function setupMeetingSocket(io) {
         iceServers: buildIceServers(),
         hostReconnectUntil: room.hostReconnectUntil,
         attendanceGraceUntil: toIso(room.attendanceGraceUntil),
+        meetingCode: access.role === 'teacher' ? room.meetingCode : null,
       })
+
+      if (previousHostSocketId !== room.hostSocketId) {
+        io.to(normalizedMeetingId).emit('meeting:host-changed', {
+          hostSocketId: room.hostSocketId,
+          hostUserId: room.hostUserId,
+        })
+      }
 
       emitMeetingState(normalizedMeetingId, room)
 
@@ -524,12 +585,26 @@ module.exports = function setupMeetingSocket(io) {
       })
     })
 
+    socket.on('meeting:code-set', ({ meetingCode } = {}) => {
+      const { meetingId } = socket.data || {}
+      if (!meetingId) return
+
+      const room = rooms.get(meetingId)
+      if (!room || !isTeacherHost(room, socket)) return
+
+      const nextCode = String(meetingCode || generateMeetingCode()).trim()
+      if (!nextCode) return
+
+      room.meetingCode = nextCode
+      socket.emit('meeting:code-updated', { meetingCode: nextCode })
+    })
+
     socket.on('meeting:attendance-grace-set', async ({ minutes } = {}) => {
       const { meetingId, userId } = socket.data || {}
       if (!meetingId) return
 
       const room = rooms.get(meetingId)
-      if (!room || room.hostSocketId !== socket.id) return
+      if (!room || !isTeacherHost(room, socket)) return
 
       const normalizedMinutes = Math.max(0, Math.min(120, Number(minutes || 0)))
       room.attendanceGraceUntil = new Date(Date.now() + (normalizedMinutes * 60 * 1000))
@@ -553,7 +628,7 @@ module.exports = function setupMeetingSocket(io) {
       if (!meetingId) return
 
       const room = rooms.get(meetingId)
-      if (!room || room.hostSocketId !== socket.id) return
+      if (!room || !isTeacherHost(room, socket)) return
 
       room.attendanceGraceUntil = new Date()
       room.attendanceJoinClosed = true
@@ -582,6 +657,21 @@ module.exports = function setupMeetingSocket(io) {
       })
     })
 
+    socket.on('meeting:reaction', ({ emoji } = {}) => {
+      const { meetingId, userId } = socket.data || {}
+      if (!meetingId || !emoji) return
+
+      const room = rooms.get(meetingId)
+      if (!room || !room.participants.has(socket.id)) return
+
+      io.to(meetingId).emit('meeting:reaction', {
+        socketId: socket.id,
+        userId: userId || null,
+        emoji: String(emoji).slice(0, 8),
+        at: Date.now(),
+      })
+    })
+
     socket.on('meeting:ping', () => {
       const { meetingId } = socket.data || {}
       socket.emit('meeting:pong', {
@@ -600,8 +690,7 @@ module.exports = function setupMeetingSocket(io) {
       if (!meetingId) return
 
       const room = rooms.get(meetingId)
-      if (!room) return
-      if (room.hostSocketId !== socket.id) return
+      if (!room || !isTeacherHost(room, socket)) return
 
       clearHostReconnectTimer(room)
       io.to(meetingId).emit('meeting:ended')
@@ -630,7 +719,7 @@ module.exports = function setupMeetingSocket(io) {
       if (!meetingId || !targetSocketId) return
 
       const room = rooms.get(meetingId)
-      if (!room || room.hostSocketId !== socket.id) return
+      if (!room || !isTeacherHost(room, socket)) return
 
       const targetSocket = io.sockets.sockets.get(targetSocketId)
       if (!targetSocket) return

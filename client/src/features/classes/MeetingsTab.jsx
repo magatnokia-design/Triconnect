@@ -23,6 +23,7 @@ import { useAuthStore } from '../../store/authStore'
 import { API_BASE_URL, SOCKET_OPTIONS, SOCKET_RECONNECTION_ENABLED, SOCKET_URL, warmupRealtimeEndpoint } from '../../shared/config/realtime'
 
 const DEFAULT_ICE_SERVERS = [{ urls: 'stun:stun.l.google.com:19302' }]
+const REACTIONS = ['👍', '👏', '😂', '🎉', '❤️']
 
 function buildDisplayName(profile, user) {
   if (profile?.full_name) return profile.full_name
@@ -69,6 +70,9 @@ export default function MeetingsTab({ classId }) {
   const [graceRemainingSeconds, setGraceRemainingSeconds] = useState(0)
   const [connectionStatus, setConnectionStatus] = useState('idle')
   const [connectionDetail, setConnectionDetail] = useState('')
+  const [meetingCode, setMeetingCode] = useState('')
+  const [meetingCodeInput, setMeetingCodeInput] = useState('')
+  const [reactionBursts, setReactionBursts] = useState([])
 
   const socketRef = useRef(null)
   const endingMeetingRef = useRef(false)
@@ -261,6 +265,19 @@ export default function MeetingsTab({ classId }) {
     endMeetingFallbackTimerRef.current = null
   }
 
+  const pushReaction = (emoji) => {
+    const id = `${Date.now()}-${Math.random()}`
+    setReactionBursts((prev) => [...prev, { id, emoji }])
+    window.setTimeout(() => {
+      setReactionBursts((prev) => prev.filter((reaction) => reaction.id !== id))
+    }, 2000)
+  }
+
+  const sendReaction = (emoji) => {
+    socketRef.current?.emit('meeting:reaction', { emoji })
+    pushReaction(emoji)
+  }
+
   const leaveMeeting = ({ skipServerLeave = false, preserveError = false } = {}) => {
     clearEndMeetingFallbackTimer()
 
@@ -292,6 +309,9 @@ export default function MeetingsTab({ classId }) {
     setAttendanceGraceUntil(null)
     setConnectionStatus('idle')
     setConnectionDetail('')
+    setMeetingCode('')
+    setMeetingCodeInput('')
+    setReactionBursts([])
     if (!preserveError) {
       setError('')
     }
@@ -350,6 +370,11 @@ export default function MeetingsTab({ classId }) {
   const joinMeeting = async () => {
     if (connectionStatus === 'connecting') return
 
+    if (!isTeacher && !meetingCodeInput.trim()) {
+      setError('Meeting code is required.')
+      return
+    }
+
     if (socketRef.current) {
       socketRef.current.disconnect()
       socketRef.current = null
@@ -400,6 +425,7 @@ export default function MeetingsTab({ classId }) {
           micOn: true,
           camOn: Boolean(cameraTrackRef.current),
           screenOn: false,
+          meetingCode: isTeacher ? undefined : meetingCodeInput.trim(),
         })
       }
 
@@ -453,7 +479,7 @@ export default function MeetingsTab({ classId }) {
         setError(message || 'Unable to join meeting.')
       })
 
-      socket.on('meeting:joined', async ({ participants: existing, isHost: host, hostSocketId: hostSid, hostReconnectUntil: reconnectUntil, iceServers: nextIceServers, attendanceGraceUntil: nextAttendanceGraceUntil }) => {
+      socket.on('meeting:joined', async ({ participants: existing, isHost: host, hostSocketId: hostSid, hostReconnectUntil: reconnectUntil, iceServers: nextIceServers, attendanceGraceUntil: nextAttendanceGraceUntil, meetingCode: nextMeetingCode }) => {
         setError('')
         setJoined(true)
         setConnectionStatus('connected')
@@ -462,6 +488,9 @@ export default function MeetingsTab({ classId }) {
         setHostSocketId(hostSid || null)
         setHostReconnectUntil(reconnectUntil || null)
         setAttendanceGraceUntil(nextAttendanceGraceUntil || null)
+        if (nextMeetingCode) {
+          setMeetingCode(nextMeetingCode)
+        }
         setParticipants(existing || [])
 
         if (Array.isArray(nextIceServers) && nextIceServers.length > 0) {
@@ -503,6 +532,18 @@ export default function MeetingsTab({ classId }) {
 
       socket.on('meeting:attendance-grace-updated', ({ attendanceGraceUntil: nextGraceUntil }) => {
         setAttendanceGraceUntil(nextGraceUntil || null)
+      })
+
+      socket.on('meeting:code-updated', ({ meetingCode: nextMeetingCode }) => {
+        if (nextMeetingCode) {
+          setMeetingCode(nextMeetingCode)
+        }
+      })
+
+      socket.on('meeting:reaction', ({ emoji, socketId }) => {
+        if (!emoji) return
+        if (socketId && socketId === socket.id) return
+        pushReaction(emoji)
       })
 
       socket.on('meeting:ended', () => {
@@ -868,6 +909,15 @@ export default function MeetingsTab({ classId }) {
 
   return (
     <div className={isFullscreenUI ? 'fixed inset-0 z-50 bg-slate-950 p-4 md:p-6 overflow-auto' : 'space-y-5'}>
+      {reactionBursts.length > 0 && (
+        <div className="fixed bottom-24 right-6 z-50 flex flex-col gap-2 pointer-events-none">
+          {reactionBursts.map((reaction) => (
+            <div key={reaction.id} className="text-2xl animate-bounce">
+              {reaction.emoji}
+            </div>
+          ))}
+        </div>
+      )}
       {!joined ? (
         <div className="bg-white border border-gray-100 rounded-2xl shadow-sm p-6">
           <div className="flex items-center justify-between gap-4 flex-wrap">
@@ -883,6 +933,18 @@ export default function MeetingsTab({ classId }) {
               {connectionStatus === 'connecting' || connectionStatus === 'reconnecting' ? 'Connecting...' : 'Join Meeting'}
             </button>
           </div>
+
+          {!isTeacher && (
+            <div className="mt-4">
+              <label className="text-xs font-semibold text-gray-500">Meeting Code</label>
+              <input
+                value={meetingCodeInput}
+                onChange={(e) => setMeetingCodeInput(e.target.value)}
+                className="mt-1 w-full border border-gray-200 rounded-lg px-3 py-2 text-sm"
+                placeholder="Enter code from your teacher"
+              />
+            </div>
+          )}
 
           {error && (
             <div className="mt-4 flex items-center gap-2 rounded-xl border border-red-100 bg-red-50 text-red-600 px-3 py-2 text-sm">
@@ -910,6 +972,18 @@ export default function MeetingsTab({ classId }) {
             </div>
 
             <div className="flex items-center gap-2">
+              <div className="flex items-center gap-1">
+                {REACTIONS.map((emoji) => (
+                  <button
+                    key={emoji}
+                    onClick={() => sendReaction(emoji)}
+                    className={`px-2 py-2 rounded-lg text-sm transition ${isFullscreenUI ? 'bg-slate-800 text-white hover:bg-slate-700' : 'bg-gray-100 text-gray-700 hover:bg-gray-200'}`}
+                    title="Send reaction"
+                  >
+                    {emoji}
+                  </button>
+                ))}
+              </div>
               <button
                 onClick={toggleMic}
                 className={`px-3 py-2 rounded-xl text-sm font-semibold transition flex items-center gap-2 ${micOn ? 'bg-gray-100 text-gray-700 hover:bg-gray-200' : 'bg-red-50 text-red-600 hover:bg-red-100'}`}
@@ -961,6 +1035,30 @@ export default function MeetingsTab({ classId }) {
               )}
             </div>
           </div>
+
+          {isTeacher && isHost && (
+            <div className="rounded-xl border border-blue-100 bg-blue-50 px-3 py-3 flex items-center justify-between gap-3 flex-wrap">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-wide text-blue-700">Meeting Code</p>
+                <p className="text-sm font-mono text-blue-900">{meetingCode || 'Generating...'}</p>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => meetingCode && navigator.clipboard.writeText(meetingCode)}
+                  disabled={!meetingCode}
+                  className="rounded-lg border border-blue-200 bg-white text-blue-700 px-3 py-1.5 text-xs font-semibold hover:bg-blue-100 disabled:opacity-60"
+                >
+                  Copy
+                </button>
+                <button
+                  onClick={() => socketRef.current?.emit('meeting:code-set')}
+                  className="rounded-lg bg-blue-600 text-white px-3 py-1.5 text-xs font-semibold hover:bg-blue-700"
+                >
+                  Regenerate
+                </button>
+              </div>
+            </div>
+          )}
 
           {isHost && (
             <div className="rounded-xl border border-blue-100 bg-blue-50 px-3 py-3 flex items-center justify-between gap-3 flex-wrap">
