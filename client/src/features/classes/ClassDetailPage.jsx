@@ -12,7 +12,7 @@ import ChatTab from './ChatTab'
 
 
 const TABS = ['Students', 'Modules', 'Assignments', 'Quizzes', 'Meetings', 'Chat']
-const MEETINGS_TEMP_DISABLED = true
+const MEETINGS_TEMP_DISABLED = false
 
 const TAB_BY_QUERY = {
   students: 'Students',
